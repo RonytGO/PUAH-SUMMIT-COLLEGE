@@ -11,26 +11,22 @@ function assertEnv() {
   }
 }
 
-function getCustomerExternalIdentifier(saved) {
-  if (!saved || !saved.customerexternalidentifier) {
-    throw new Error("customerexternalidentifier is required");
-  }
-  return String(saved.customerexternalidentifier);
+function credentials() {
+  return {
+    CompanyID: Number(process.env.SUMMIT_COMPANY_ID),
+    APIKey: process.env.SUMMIT_API_KEY
+  };
 }
 
-function getPersonId(saved) {
-  if (!saved || !saved.personid) {
-    throw new Error("personid is required");
+function required(value, name) {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    throw new Error(`${name} is required`);
   }
-  return String(saved.personid);
+  return String(value).trim();
 }
 
 function normalizeAmount(rawAmount) {
-  if (rawAmount === undefined || rawAmount === null || rawAmount === "") {
-    throw new Error("amount is required");
-  }
-
-  const cleaned = String(rawAmount).replace(/[^\d.]/g, "");
+  const cleaned = required(rawAmount, "amount").replace(/[^\d.]/g, "");
   const amount = Number(cleaned);
 
   if (!amount || isNaN(amount) || amount <= 0) {
@@ -47,9 +43,7 @@ function normalizePayments(rawPayments) {
 }
 
 function normalizePaymentMethod(method) {
-  if (!method) return "credit";
-
-  const m = String(method).trim();
+  const m = required(method, "paymentmethod");
 
   if (m === "כרטיס אשראי") return "credit";
   if (m === "מזומן") return "cash";
@@ -58,7 +52,7 @@ function normalizePaymentMethod(method) {
   throw new Error("Unsupported payment method");
 }
 
-/* ---------------- SUMMIT RESPONSE HANDLER ---------------- */
+/* ---------------- SUMMIT ---------------- */
 
 function unwrapSummit(response) {
   if (!response || response.Status === undefined) {
@@ -76,204 +70,131 @@ function unwrapSummit(response) {
   return response.Data || {};
 }
 
+async function summitPost(endpoint, payload, label) {
+  assertEnv();
+
+  const res = await fetch(`https://app.sumit.co.il${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, Credentials: credentials() })
+  });
+
+  const text = await res.text();
+  console.log(`SUMMIT ${label} RESPONSE:`, text);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`${label} failed: ${text}`);
+  }
+
+  return unwrapSummit(parsed);
+}
+
 /* ---------------- CUSTOMER UPSERT ---------------- */
 
-async function updateCustomer(saved) {
-  assertEnv();
-
+function customerDetails(customer) {
   const details = {
-    ExternalIdentifier: saved.customerexternalidentifier,
-    SearchMode: 2
+    ExternalIdentifier: customer.id,
+    Name: customer.name
   };
 
-  if (saved.CustomerCity) details.City = saved.CustomerCity;
-  if (saved.CustomerAddress) details.Address = saved.CustomerAddress;
-  if (saved.CustomerPhone) details.Phone = saved.CustomerPhone;
-  if (saved.CustomerEmail) details.EmailAddress = saved.CustomerEmail;
-  if (saved.CustomerName) details.Name = saved.CustomerName;
+  if (customer.phone) details.Phone = customer.phone;
+  if (customer.email) details.EmailAddress = customer.email;
+  if (customer.city) details.City = customer.city;
+  if (customer.address) details.Address = customer.address;
 
-  const payload = {
-    Details: details,
-    Credentials: {
-      CompanyID: Number(process.env.SUMMIT_COMPANY_ID),
-      APIKey: process.env.SUMMIT_API_KEY
-    }
-  };
-
-  const res = await fetch(
-    "https://app.sumit.co.il/accounting/customers/update/",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  const text = await res.text();
-  console.log("SUMMIT UPDATE RESPONSE:", text);
-
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("Customer update failed: " + text);
-  }
-
-  unwrapSummit(parsed);
+  return details;
 }
 
-async function createCustomer(saved) {
-  assertEnv();
+async function ensureCustomer(customer) {
+  const details = customerDetails(customer);
 
-  const details = {
-    ExternalIdentifier: saved.customerexternalidentifier,
-    Name: saved.CustomerName || "Client"
-  };
-
-  if (saved.CustomerPhone) details.Phone = saved.CustomerPhone;
-  if (saved.CustomerEmail) details.EmailAddress = saved.CustomerEmail;
-  if (saved.CustomerCity) details.City = saved.CustomerCity;
-  if (saved.CustomerAddress) details.Address = saved.CustomerAddress;
-  if (saved.personid) details.CompanyNumber = saved.personid;
-
-  const payload = {
-    Details: details,
-    Credentials: {
-      CompanyID: Number(process.env.SUMMIT_COMPANY_ID),
-      APIKey: process.env.SUMMIT_API_KEY
-    }
-  };
-
-  const res = await fetch(
-    "https://app.sumit.co.il/accounting/customers/create/",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  const text = await res.text();
-  console.log("SUMMIT CREATE RESPONSE:", text);
-
-  let parsed;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("Customer create failed: " + text);
-  }
-
-  unwrapSummit(parsed);
-}
-
-async function ensureCustomer(saved) {
-  try {
-    await updateCustomer(saved);
+    await summitPost(
+      "/accounting/customers/update/",
+      { Details: { ...details, SearchMode: 2 } },
+      "CUSTOMER UPDATE"
+    );
   } catch (err) {
     console.log("Update failed, trying create:", err.message);
-    await createCustomer(saved);
+    await summitPost(
+      "/accounting/customers/create/",
+      { Details: details },
+      "CUSTOMER CREATE"
+    );
   }
 }
 
 /* ---------------- DOCUMENT CREATION ---------------- */
 
-async function createInvoiceAndReceipt({
-  saved,
-  amount,
-  last4,
-  payments,
-  sku,
-  paymentMethod,
-  bankNumber,
-  branchNumber,
-  accountNumber
-}) {
-  assertEnv();
-
-  paymentMethod = normalizePaymentMethod(paymentMethod);
-  payments = normalizePayments(payments);
-
-  let paymentObject;
-
+function buildPayment({ amount, paymentMethod, last4, payments, bankNumber, branchNumber, accountNumber }) {
   if (paymentMethod === "cash") {
-    paymentObject = { Amount: amount, Type: 2 };
+    return { Amount: amount, Type: 2 };
   }
 
   if (paymentMethod === "credit") {
-    const creditCardDetails = {
-      Last4Digits: last4 ? String(last4) : null,
-      Payments: payments
-    };
-
-    if (payments === 1) {
-      creditCardDetails.FirstPayment = amount;
-    } else {
-      const installment = amount / payments;
-      creditCardDetails.FirstPayment = installment;
-      creditCardDetails.EachPayment = installment;
-    }
-
-    paymentObject = {
+    return {
       Amount: amount,
       Type: 5,
-      Details_CreditCard: creditCardDetails
-    };
-  }
-
-  if (paymentMethod === "bank") {
-    paymentObject = {
-      Amount: amount,
-      Type: 3,
-      Details_BankTransfer: {
-        BankNumber: bankNumber ? Number(bankNumber) : null,
-        BranchNumber: branchNumber ? Number(branchNumber) : null,
-        AccountNumber: accountNumber ? String(accountNumber) : null
+      Details_CreditCard: {
+        Last4Digits: last4 ? String(last4) : null,
+        Payments: normalizePayments(payments)
       }
     };
   }
 
-
-
-  const payload = {
-    Details: {
-      Type: 1,
-      Date: new Date().toISOString(),
-      Original: true,
-      IsDraft: false,
-      Customer: {
-        ExternalIdentifier: saved.customerexternalidentifier,
-        SearchMode: 2
-      }
-    },
-    Items: [
-      {
-        Quantity: 1,
-        UnitPrice: amount,
-        TotalPrice: amount,
-        Item: {
-          ExternalIdentifier: String(sku),
-          SearchMode: 2
-        }
-      }
-    ],
-    Payments: [paymentObject],
-    VATIncluded: true,
-    Credentials: {
-      CompanyID: Number(process.env.SUMMIT_COMPANY_ID),
-      APIKey: process.env.SUMMIT_API_KEY
+  return {
+    Amount: amount,
+    Type: 3,
+    Details_BankTransfer: {
+      BankNumber: bankNumber ? Number(bankNumber) : null,
+      BranchNumber: branchNumber ? Number(branchNumber) : null,
+      AccountNumber: accountNumber ? String(accountNumber) : null
     }
   };
+}
 
-  const res = await fetch(
-    "https://app.sumit.co.il/accounting/documents/create/",
+async function createInvoiceAndReceipt({ customer, amount, course, paymentId, payment }) {
+  const details = {
+    Type: 1,
+    Date: new Date().toISOString(),
+    Original: true,
+    IsDraft: false,
+    Customer: {
+      ExternalIdentifier: customer.id,
+      SearchMode: 2
+    },
+    ExternalReference: paymentId,
+    ClosingText: 'לכל שאלה / בירור, ניתן לפנות אלינו בדוא"ל לכתובת: hd@puah.org.il'
+  };
+
+  if (customer.email) {
+    details.SendByEmail = {
+      EmailAddress: customer.email,
+      Original: true,
+      SendAsPaymentRequest: false
+    };
+  }
+
+  const summit = await summitPost(
+    "/accounting/documents/create/",
     {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }
+      Details: details,
+      Items: [
+        {
+          Quantity: 1,
+          UnitPrice: amount,
+          TotalPrice: amount,
+          Item: { Name: course }
+        }
+      ],
+      Payments: [payment],
+      VATIncluded: true
+    },
+    "DOCUMENT CREATE"
   );
-
-  const summit = unwrapSummit(await res.json());
 
   if (!summit.DocumentID) {
     throw new Error("Failed to create document");
@@ -286,54 +207,44 @@ async function createInvoiceAndReceipt({
 
 app.get("/summit-from-sf", async (req, res) => {
   try {
-    const {
-      paymentId,
-      familyid,
-      personid,
-      customername,
-      customerphone,
-      customeremail,
-      amount,
-      sku,
-      last4,
-      payments,
-      paymentmethod,
-      banknumber,
-      branchnumber,
-      accountnumber,
-      city,
-      address
-    } = req.query;
+    const q = req.query;
 
-    const normalizedAmount = normalizeAmount(amount);
+    const paymentId = required(q.paymentId, "paymentId");
+    const amount = normalizeAmount(q.amount);
+    const course = required(q.course, "course");
 
-    const saved = {
-      customerexternalidentifier: familyid,
-      personid,
-      CustomerName: customername,
-      CustomerPhone: customerphone,
-      CustomerEmail: customeremail,
-      CustomerCity: city,
-      CustomerAddress: address
+    const customer = {
+      id: required(q.customerid, "customerid"),
+      name: required(q.customername, "customername"),
+      phone: q.customerphone,
+      email: q.customeremail,
+      city: q.city,
+      address: q.address
     };
 
-    await ensureCustomer(saved);
+    const payment = buildPayment({
+      amount,
+      paymentMethod: normalizePaymentMethod(q.paymentmethod),
+      last4: q.last4,
+      payments: q.payments,
+      bankNumber: q.banknumber,
+      branchNumber: q.branchnumber,
+      accountNumber: q.accountnumber
+    });
+
+    await ensureCustomer(customer);
 
     const document = await createInvoiceAndReceipt({
-      saved,
-      amount: normalizedAmount,
-      last4,
-      payments,
-      sku,
-      paymentMethod: paymentmethod,
-      bankNumber: banknumber,
-      branchNumber: branchnumber,
-      accountNumber: accountnumber
+      customer,
+      amount,
+      course,
+      paymentId,
+      payment
     });
 
     res.redirect(
       `https://puah.lightning.force.com/flow/SaveReceipt` +
-      `?recordId=${paymentId}` +
+      `?recordId=${encodeURIComponent(paymentId)}` +
       `&receiptUrl=${encodeURIComponent(document.DocumentDownloadURL)}`
     );
 
