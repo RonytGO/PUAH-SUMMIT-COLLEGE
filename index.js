@@ -183,8 +183,6 @@ async function createInvoiceAndReceipt({
   last4,
   payments,
   sku,
-  hospital,
-  datecare,
   paymentMethod,
   bankNumber,
   branchNumber,
@@ -234,11 +232,7 @@ async function createInvoiceAndReceipt({
     };
   }
 
-  const formattedDate = datecare
-    ? new Date(datecare).toLocaleDateString("he-IL")
-    : "";
 
-  const itemDescription = `השגחה בטיפול פוריות ${formattedDate} ${hospital || ""}`.trim();
 
   const payload = {
     Details: {
@@ -256,7 +250,6 @@ async function createInvoiceAndReceipt({
         Quantity: 1,
         UnitPrice: amount,
         TotalPrice: amount,
-        Description: itemDescription,
         Item: {
           ExternalIdentifier: String(sku),
           SearchMode: 2
@@ -301,11 +294,9 @@ app.get("/summit-from-sf", async (req, res) => {
       customerphone,
       customeremail,
       amount,
-      hospital,
       sku,
       last4,
       payments,
-      datecare,
       paymentmethod,
       banknumber,
       branchnumber,
@@ -334,8 +325,6 @@ app.get("/summit-from-sf", async (req, res) => {
       last4,
       payments,
       sku,
-      hospital,
-      datecare,
       paymentMethod: paymentmethod,
       bankNumber: banknumber,
       branchNumber: branchnumber,
